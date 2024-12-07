@@ -62,12 +62,6 @@ class CreditRequest(BaseTransaction):
 
 
 class ChargeSale(BaseTransaction):
-    STATUS_CHOICES = [
-        ("PENDING", "Pending"),
-        ("COMPLETED", "Completed"),
-        ("FAILED", "Failed"),
-    ]
-
     phone_number = models.ForeignKey(
         PhoneNumber,
         on_delete=models.PROTECT,
@@ -81,6 +75,13 @@ class ChargeSale(BaseTransaction):
             models.Index(fields=["user", "created_at"]),
             models.Index(fields=["phone_number"]),
             models.Index(fields=["status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["id", "processed"],
+                condition=models.Q(processed=True),
+                name="unique_processed_request",
+            ),
         ]
 
     def __str__(self):
