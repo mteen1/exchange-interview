@@ -92,7 +92,7 @@ async def create_credit_request(request, data: CreditRequestCreateSchema):
 
 def approve_transaction(request, request_id: int):
     logger.info(f"Processing credit request approval for request ID: {request_id}")
-    credit_request = CreditRequest.objects.get(id=request_id)
+    credit_request = CreditRequest.objects.select_for_update().get(id=request_id)
     if credit_request.processed:
         logger.warning(f"Credit request {request_id} was already processed")
         return {"detail": "Already processed"}
@@ -145,11 +145,14 @@ def create_charge(request, data):
         with transaction.atomic():
             # Perform updates on user credit and phone number in a single atomic transaction
             # This avoids race conditions, it directly updates the database without loading to memory
-            User.objects.filter(id=request.user.id).update(
+            # Select for update locks the row until the transaction is committed
+            User.objects.filter(id=request.user.id).select_for_update().update(
                 credit=F("credit") - data.amount,
             )
             # You could test this by raising an exception
-            PhoneNumber.objects.filter(id=data.phone_number_id).update(
+            PhoneNumber.objects.filter(
+                id=data.phone_number_id
+            ).select_for_update().update(
                 current_charge=F("current_charge") + data.amount,
             )
             # Create charge sale in a single query
