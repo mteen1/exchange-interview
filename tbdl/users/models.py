@@ -1,5 +1,8 @@
 from django.contrib.auth.models import AbstractUser
+from django.core.validators import MinValueValidator
 from django.db.models import CharField
+from django.db.models import IntegerField
+from django.db.models import Sum
 from django.urls import reverse
 from django.utils.translation import gettext_lazy as _
 
@@ -11,6 +14,11 @@ class User(AbstractUser):
     check forms.SignupForm and forms.SocialSignupForms accordingly.
     """
 
+    credit = IntegerField(
+        _("Credit"),
+        default=0,
+        validators=[MinValueValidator(0)],
+    )
     # First and last name do not cover name patterns around the globe
     name = CharField(_("Name of User"), blank=True, max_length=255)
     first_name = None  # type: ignore[assignment]
@@ -24,3 +32,12 @@ class User(AbstractUser):
 
         """
         return reverse("users:detail", kwargs={"username": self.username})
+
+    def get_balance(self) -> str:
+        """Get user's balance.
+
+        Returns:
+            str: User's balance.
+
+        """
+        return self.transactions.aggregate(balance=Sum("amount"))["balance"] or 0
