@@ -1,114 +1,100 @@
-from datetime import datetime
-from locust import HttpUser, task, between
-import json
+from locust import HttpUser, task, between, events
 import random
 
-class TBDLUser(HttpUser):
-    wait_time = between(1, 2)
-    test_user = {
-        "username": "root",
-        "password": "root"
-    }
+class SellerUser(HttpUser):
+    wait_time = between(0.1, 0.5)
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.username = "root"
+        self.charge_sales_made = 0
     
     def on_start(self):
-        """Get authentication token"""
-        # Get token from DRF token endpoint
-        response = self.client.post("/drf/auth-token/", json=self.test_user)
+        # Assign alternating usernames to distribute load
+        self.username = "root" if self.environment.runner.user_count % 2 == 0 else "root1"
+        self.password = self.username
+        
+        # Get auth token
+        response = self.client.post("/drf/auth-token/", 
+            json={"username": self.username, "password": self.password})
+            
         if response.status_code != 200:
-            raise Exception("Failed to get auth token")
+            raise Exception(f"Failed to authenticate {self.username}")
         
         token = response.json()["token"]
-        
-        # Setup authorization header for all requests
         self.client.headers.update({
-            "Authorization": f"Bearer {token}"
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json"
         })
 
-    @task(3)
-    def list_phone_numbers(self):
-        self.client.get("/api/charge/phone-numbers")
-
-    @task(2)
-    def get_phone_number(self):
-        # Assuming phone IDs range from 1 to 10
-        phone_id = random.randint(1, 10)
-        self.client.get(f"/api/charge/phone-numbers/{phone_id}")
-
-    @task(2)
-    def list_credit_requests(self):
-        self.client.get("/api/charge/credit-requests")
-
-    @task(1)
-    def create_credit_request(self):
-        payload = {
-            "amount": random.randint(10, 100)
-        }
-        response = self.client.post("/api/charge/credit-requests", json=payload)
-        if response.status_code == 200:
-            request_id = response.json()["id"]
-            # Approve the created credit request
-            self.client.post(f"/api/charge/credit-requests/{request_id}/approve")
-
-    @task(2)
-    def list_charge_sales(self):
-        self.client.get("/api/charge/charge-sales")
-
-    @task(1)
-    def create_charge_sale(self):
-        payload = {
-            "amount": random.randint(1, 50),
-            "phone_number_id": random.randint(1, 10)
-        }
-        self.client.post("/api/charge/charge-sales", json=payload)
-
-class ChargeSaleUser(TBDLUser):
-    """User focused on charge sale operations"""
-    wait_time = between(2, 5)
-
-    @task(3)
-    def charge_workflow(self):
-        # Get available phone numbers
-        phones_response = self.client.get("/api/charge/phone-numbers")
-        if phones_response.status_code != 200:
-            return
-
-        phones = phones_response.json()
-        if not phones:
-            return
-
-        # Create and approve a credit request
-        credit_amount = random.randint(1000000, 2000000)
-        credit_response = self.client.post("/api/charge/credit-requests", 
-            json={"amount": credit_amount})
-        
-        if credit_response.status_code == 200:
-            request_id = credit_response.json()["id"]
-            self.client.post(f"/api/charge/credit-requests/{request_id}/approve")
-
-            # Create a charge sale
-            phone = random.choice(phones)
-            charge_amount = random.randint(10, credit_amount)
-            self.client.post("/api/charge/charge-sales", 
-                json={
-                    "amount": charge_amount,
-                    "phone_number_id": phone["id"]
-                })
-
-class CreditRequestUser(TBDLUser):
-    """User focused on credit operations"""
-    wait_time = between(3, 7)
-
-    @task
-    def credit_workflow(self):
-        # List existing requests
-        self.client.get("/api/charge/credit-requests")
-        
-        # Create new request
-        amount = random.randint(100, 500)
+        amount = random.randint(1000000, 2000000)
         response = self.client.post("/api/charge/credit-requests", 
             json={"amount": amount})
         
         if response.status_code == 200:
             request_id = response.json()["id"]
-            # Wait a bit before approving
             self.client.post(f"/api/charge/credit-requests/{request_id}/approve")
+
+    @task
+    def charge_sale(self):
+        # Stop if we've made 10 sales (with 100 users this gives us 1000 total)
+        if self.charge_sales_made >= 10:
+            return
+
+        phones_response = self.client.get("/api/charge/phone-numbers")
+        if phones_response.status_code == 200:
+            phones = phones_response.json()
+            if phones:
+                phone = random.choice(phones)
+                amount = random.randint(1000, 5000)
+                
+                response = self.client.post("/api/charge/charge-sales", 
+                    json={
+                        "amount": amount,
+                        "phone_number_id": phone["id"]
+                    },
+                    verify=False)
+                
+                if response.status_code == 200:
+                    self.charge_sales_made += 1
+
+@events.test_stop.add_listener
+def on_test_stop(environment, **kwargs):
+    """Validate transactions by calling the validate endpoint"""
+    if environment.stats.total.num_requests == 0:
+        return
+
+    print("\n=== Test Summary ===")
+    try:
+        # Create a test user instance to get authenticated client
+        test_user = environment.runner.user_classes[0](environment)
+        
+        # Authenticate first
+        credentials = {
+            "username": "root",
+            "password": "root"
+        }
+        auth_response = test_user.client.post("/drf/auth-token/", json=credentials)
+        
+        if auth_response.status_code != 200:
+            print(f"Failed to authenticate: {auth_response.text}")
+            return
+            
+        # Set authorization header
+        token = auth_response.json()["token"]
+        test_user.client.headers = {"Authorization": f"Bearer {token}"}
+        
+        # Make the validation request
+        response = test_user.client.get("/api/charge/validate")
+        
+        if response.status_code == 200:
+            results = response.json()
+            print("Validation Results:")
+            print(f"Total approved credits: {results['total_approved_credits']}")
+            print(f"Current user credits: {results['current_user_credits']}")
+            print(f"Total spent credits: {results['total_spent_credits']}")
+            print(f"Total charge sales: {results['total_charge_sales']}")
+            print(f"Consistency check: {'PASSED' if results['is_consistent'] else 'FAILED'}")
+            print(f"Details: {results['details']}")
+    except Exception as e:
+        print(f"Failed to get validation results: {e}")

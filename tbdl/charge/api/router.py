@@ -1,8 +1,7 @@
 import logging
 from datetime import datetime
 from ninja.security import HttpBearer
-from django.contrib.auth.models import AnonymousUser
-
+from django.db import models
 from asgiref.sync import sync_to_async
 from django.contrib.auth import get_user
 from django.db import transaction
@@ -68,6 +67,15 @@ class ChargeSaleCreateSchema(Schema):
     phone_number_id: int
 
 
+class ValidationResultSchema(Schema):
+    total_approved_credits: int
+    current_user_credits: int
+    total_spent_credits: int
+    total_charge_sales: int
+    is_consistent: bool
+    details: str
+
+
 @router.get("/phone-numbers", response=list[PhoneNumberResponseSchema])
 async def list_phone_numbers(request):
     return [phone async for phone in PhoneNumber.objects.filter(is_active=True)]
@@ -104,27 +112,33 @@ async def create_credit_request(request, data: CreditRequestCreateSchema):
 
 def approve_transaction(request, request_id: int):
     logger.info(f"Processing credit request approval for request ID: {request_id}")
-    credit_request = CreditRequest.objects.get(id=request_id)
-    if credit_request.processed:
-        logger.warning(f"Credit request {request_id} was already processed")
-        return {"detail": "Already processed"}
-
     try:
         with transaction.atomic():
+            # Lock the credit request row
+            credit_request = CreditRequest.objects.select_for_update().get(id=request_id)
+            
+            if credit_request.processed:
+                logger.warning(f"Credit request {request_id} was already processed")
+                return {"detail": "Already processed"}
+
+            # Update credit request status
             credit_request.status = "APPROVED"
             credit_request.processed = True
             credit_request.save()
-            # You could test this by raising an exception here
-            request.auth.credit += credit_request.amount
-            request.auth.save()
-            logger.info(
-                f"Successfully approved credit request {request_id} for user {request.auth.id}",
+
+            # Update user credit using F() expression to prevent race conditions
+            User.objects.filter(id=request.auth.id).select_for_update().update(
+                credit=F("credit") + credit_request.amount
             )
+            
+            logger.info(f"Successfully approved credit request {request_id} for user {request.auth.id}")
+            
+            # Refresh from db to get updated state
+            return CreditRequest.objects.get(id=request_id)
+
     except Exception as e:
         logger.exception(f"Error processing credit request {request_id}: {e!s}")
         raise
-
-    return credit_request
 
 
 @router.post("/credit-requests/{request_id}/approve", response=CreditRequestSchema)
@@ -147,42 +161,95 @@ def create_charge(request, data):
         f"Creating charge sale for user {request.auth.id}, amount: {data.amount}, phone: {data.phone_number_id}",
     )
 
-    if request.auth.credit < data.amount:
-        logger.warning(
-            f"Insufficient credit for user {request.auth.id}. Required: {data.amount}, Available: {request.auth.credit}",
-        )
-        return {"detail": "Insufficient credit"}
-
     try:
         with transaction.atomic():
-            # Perform updates on user credit and phone number in a single atomic transaction
-            # This avoids race conditions, it directly updates the database without loading to memory
-            # Select for update locks the row until the transaction is committed
-            User.objects.filter(id=request.auth.id).select_for_update().update(
+            # First get and lock the user row
+            user = User.objects.select_for_update().get(id=request.auth.id)
+            
+            # Check credit AFTER getting lock
+            if user.credit < data.amount:
+                logger.warning(
+                    f"Insufficient credit for user {user.id}. Required: {data.amount}, Available: {user.credit}",
+                )
+                return {"detail": "Insufficient credit"}
+
+            # Proceed with the update using F expressions
+            User.objects.filter(id=user.id).update(
                 credit=F("credit") - data.amount,
             )
-            # You could test this by raising an exception
+            
             PhoneNumber.objects.filter(
                 id=data.phone_number_id
             ).select_for_update().update(
                 current_charge=F("current_charge") + data.amount,
             )
-            # Create charge sale in a single query
+            
             charge_sale = ChargeSale.objects.create(
-                user=request.auth,
+                user=user,
                 phone_number_id=data.phone_number_id,
                 amount=data.amount,
                 processed=True,
                 status="APPROVED",
             )
-            logger.info(f"Successfully created charge sale for user {request.auth.id}")
+            logger.info(f"Successfully created charge sale for user {user.id}")
+            return charge_sale
+
     except Exception as e:
         logger.exception(f"Error creating charge sale: {e}")
         raise
-
-    return charge_sale
 
 
 @router.post("/charge-sales", response=ChargeSaleSchema)
 async def create_charge_sale(request, data: ChargeSaleCreateSchema):
     return await sync_to_async(create_charge)(request, data)
+
+
+@router.get("/validate", response=ValidationResultSchema)
+async def validate_transactions(request):
+    """Validate that all spent credits match with charge sales"""
+    logger.info("Running transaction validation")
+    
+    try:
+        # Get total approved credits (what users received)
+        approved_credits = await CreditRequest.objects.filter(
+            status="APPROVED",
+            processed=True
+        ).aaggregate(total=models.Sum('amount'))
+        total_approved_credits = approved_credits['total'] or 0
+
+        # Get current remaining credits across all users
+        current_credits = await User.objects.aaggregate(
+            total=models.Sum('credit')
+        )
+        current_user_credits = current_credits['total'] or 0
+
+        # Calculate how much credit was spent
+        total_spent_credits = total_approved_credits - current_user_credits
+
+        # Get total successful charge sales
+        charge_sales = await ChargeSale.objects.filter(
+            status="APPROVED",
+            processed=True
+        ).aaggregate(total=models.Sum('amount'))
+        total_charge_sales = charge_sales['total'] or 0
+
+        # Validate that spent credits match charge sales
+        is_consistent = abs(total_spent_credits - total_charge_sales) < 0.01
+
+        details = (
+            "All transactions are consistent" if is_consistent else
+            f"Mismatch: Users spent {total_spent_credits} but charge sales total is {total_charge_sales}"
+        )
+
+        return {
+            "total_approved_credits": total_approved_credits,
+            "current_user_credits": current_user_credits,
+            "total_spent_credits": total_spent_credits,
+            "total_charge_sales": total_charge_sales,
+            "is_consistent": is_consistent,
+            "details": details
+        }
+
+    except Exception as e:
+        logger.exception("Error during transaction validation")
+        raise

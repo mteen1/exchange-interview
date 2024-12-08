@@ -74,8 +74,8 @@ THIRD_PARTY_APPS = [
     "crispy_forms",
     "crispy_bootstrap5",
     "allauth",
-    "allauth.account",
-    "allauth.mfa",
+    # "allauth.account",
+    # "allauth.mfa",
     "allauth.socialaccount",
     "rest_framework",
     "rest_framework.authtoken",
@@ -139,13 +139,13 @@ MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",
     "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
-    "django.middleware.locale.LocaleMiddleware",
+    # "django.middleware.locale.LocaleMiddleware",
     "django.middleware.common.CommonMiddleware",
-    "django.middleware.csrf.CsrfViewMiddleware",
+    # "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
-    "allauth.account.middleware.AccountMiddleware",
+    # "allauth.account.middleware.AccountMiddleware",
 ]
 
 # STATIC
