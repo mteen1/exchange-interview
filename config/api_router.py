@@ -11,10 +11,10 @@ router = DefaultRouter() if settings.DEBUG else SimpleRouter()
 
 router.register("users", UserViewSet)
 
-# Charge routes
-router.register("phone-numbers", PhoneNumberViewSet, basename="phone-numbers")
-router.register("credit-requests", CreditRequestViewSet, basename="credit-requests")
-router.register("charge-sales", ChargeSaleViewSet, basename="charge-sales")
+# # Charge routes
+# router.register("phone-numbers", PhoneNumberViewSet, basename="phone-numbers")
+# router.register("credit-requests", CreditRequestViewSet, basename="credit-requests")
+# router.register("charge-sales", ChargeSaleViewSet, basename="charge-sales")
 
 
 app_name = "api"

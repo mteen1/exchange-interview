@@ -12,13 +12,14 @@ from drf_spectacular.views import SpectacularSwaggerView
 from rest_framework.authtoken.views import obtain_auth_token
 from ninja import NinjaAPI
 from tbdl.charge.api.router import router as charge_router
+from tbdl.charge.api.router import AuthBearer
 
 
 api = NinjaAPI(
     title="Tabdeal Task",
     version="1.0.0",
     description="Tabdeal Task API",
-    auth=None,
+    auth=AuthBearer(),
 )
 api.add_router(router=charge_router, prefix="charge/")
 
@@ -47,15 +48,15 @@ if settings.DEBUG:
 # API URLS
 urlpatterns += [
     # API base url
-    # path("api/", include("config.api_router")),
-    # # DRF auth token
-    # path("api/auth-token/", obtain_auth_token),
-    # path("api/schema/", SpectacularAPIView.as_view(), name="api-schema"),
-    # path(
-    #     "api/docs/",
-    #     SpectacularSwaggerView.as_view(url_name="api-schema"),
-    #     name="api-docs",
-    # ),
+    path("drf/", include("config.api_router")),
+    # DRF auth token
+    path("drf/auth-token/", obtain_auth_token),
+    path("drf/schema/", SpectacularAPIView.as_view(), name="api-schema"),
+    path(
+        "drf/docs/",
+        SpectacularSwaggerView.as_view(url_name="api-schema"),
+        name="api-docs",
+    ),
 ]
 
 if settings.DEBUG:
