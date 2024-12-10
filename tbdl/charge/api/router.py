@@ -1,13 +1,13 @@
 import logging
 from datetime import datetime
-from ninja.security import HttpBearer
-from django.db import models
+
 from asgiref.sync import sync_to_async
-from django.contrib.auth import get_user
+from django.db import models
 from django.db import transaction
 from django.db.models import F
 from ninja import Router
 from ninja import Schema
+from ninja.security import HttpBearer
 from pydantic import Field
 
 from tbdl.charge.models import ChargeSale
@@ -17,9 +17,15 @@ from tbdl.users.models import User
 
 logger = logging.getLogger(__name__)
 
+
+class Error(Schema):
+    detail: str
+
+
 class AuthBearer(HttpBearer):
     async def authenticate(self, request, token):
         from rest_framework.authtoken.models import Token
+
         try:
             token_obj = await Token.objects.aget(key=token)
             user = await User.objects.aget(id=token_obj.user_id)
@@ -27,7 +33,9 @@ class AuthBearer(HttpBearer):
         except Token.DoesNotExist:
             return None
 
+
 router = Router(auth=AuthBearer())
+
 
 class PhoneNumberResponseSchema(Schema):
     id: int
@@ -76,6 +84,15 @@ class ValidationResultSchema(Schema):
     details: str
 
 
+class UserValidationResultSchema(Schema):
+    total_approved_credits: int
+    current_user_credits: int
+    total_spent_credits: int
+    total_charge_sales: int
+    is_consistent: bool
+    details: str
+
+
 @router.get("/phone-numbers", response=list[PhoneNumberResponseSchema])
 async def list_phone_numbers(request):
     return [phone async for phone in PhoneNumber.objects.filter(is_active=True)]
@@ -115,8 +132,10 @@ def approve_transaction(request, request_id: int):
     try:
         with transaction.atomic():
             # Lock the credit request row
-            credit_request = CreditRequest.objects.select_for_update().get(id=request_id)
-            
+            credit_request = CreditRequest.objects.select_for_update().get(
+                id=request_id
+            )
+
             if credit_request.processed:
                 logger.warning(f"Credit request {request_id} was already processed")
                 return {"detail": "Already processed"}
@@ -128,11 +147,13 @@ def approve_transaction(request, request_id: int):
 
             # Update user credit using F() expression to prevent race conditions
             User.objects.filter(id=request.auth.id).select_for_update().update(
-                credit=F("credit") + credit_request.amount
+                credit=F("credit") + credit_request.amount,
             )
-            
-            logger.info(f"Successfully approved credit request {request_id} for user {request.auth.id}")
-            
+
+            logger.info(
+                f"Successfully approved credit request {request_id} for user {request.auth.id}"
+            )
+
             # Refresh from db to get updated state
             return CreditRequest.objects.get(id=request_id)
 
@@ -165,7 +186,7 @@ def create_charge(request, data):
         with transaction.atomic():
             # First get and lock the user row
             user = User.objects.select_for_update().get(id=request.auth.id)
-            
+
             # Check credit AFTER getting lock
             if user.credit < data.amount:
                 logger.warning(
@@ -177,13 +198,13 @@ def create_charge(request, data):
             User.objects.filter(id=user.id).update(
                 credit=F("credit") - data.amount,
             )
-            
+
             PhoneNumber.objects.filter(
-                id=data.phone_number_id
+                id=data.phone_number_id,
             ).select_for_update().update(
                 current_charge=F("current_charge") + data.amount,
             )
-            
+
             charge_sale = ChargeSale.objects.create(
                 user=user,
                 phone_number_id=data.phone_number_id,
@@ -208,20 +229,20 @@ async def create_charge_sale(request, data: ChargeSaleCreateSchema):
 async def validate_transactions(request):
     """Validate that all spent credits match with charge sales"""
     logger.info("Running transaction validation")
-    
+
     try:
         # Get total approved credits (what users received)
         approved_credits = await CreditRequest.objects.filter(
             status="APPROVED",
-            processed=True
-        ).aaggregate(total=models.Sum('amount'))
-        total_approved_credits = approved_credits['total'] or 0
+            processed=True,
+        ).aaggregate(total=models.Sum("amount"))
+        total_approved_credits = approved_credits["total"] or 0
 
         # Get current remaining credits across all users
         current_credits = await User.objects.aaggregate(
-            total=models.Sum('credit')
+            total=models.Sum("credit"),
         )
-        current_user_credits = current_credits['total'] or 0
+        current_user_credits = current_credits["total"] or 0
 
         # Calculate how much credit was spent
         total_spent_credits = total_approved_credits - current_user_credits
@@ -229,16 +250,17 @@ async def validate_transactions(request):
         # Get total successful charge sales
         charge_sales = await ChargeSale.objects.filter(
             status="APPROVED",
-            processed=True
-        ).aaggregate(total=models.Sum('amount'))
-        total_charge_sales = charge_sales['total'] or 0
+            processed=True,
+        ).aaggregate(total=models.Sum("amount"))
+        total_charge_sales = charge_sales["total"] or 0
 
         # Validate that spent credits match charge sales
-        is_consistent = abs(total_spent_credits - total_charge_sales) < 0.01
+        is_consistent = abs(total_spent_credits - total_charge_sales) == 0 # this could be compared with a threshold
 
         details = (
-            "All transactions are consistent" if is_consistent else
-            f"Mismatch: Users spent {total_spent_credits} but charge sales total is {total_charge_sales}"
+            "All transactions are consistent"
+            if is_consistent
+            else f"Mismatch: Users spent {total_spent_credits} but charge sales total is {total_charge_sales}"
         )
 
         return {
@@ -247,9 +269,61 @@ async def validate_transactions(request):
             "total_spent_credits": total_spent_credits,
             "total_charge_sales": total_charge_sales,
             "is_consistent": is_consistent,
-            "details": details
+            "details": details,
         }
 
-    except Exception as e:
+    except Exception:
         logger.exception("Error during transaction validation")
+        raise
+
+
+@router.get(
+    "/users/{user_id}/validate", response={200: UserValidationResultSchema, 404: Error}
+)
+async def validate_user_transactions(request, user_id: int):
+    try:
+        user = await User.objects.aget(id=user_id)
+
+        # Get total approved credits (what users received)
+        approved_credits = await CreditRequest.objects.filter(
+            user=user,
+            status="APPROVED",
+            processed=True,
+        ).aaggregate(total=models.Sum("amount"))
+        total_approved_credits = approved_credits["total"] or 0
+
+        total_spent_credits = total_approved_credits - user.credit
+
+        # Get total successful charge sales
+        charge_sales = await ChargeSale.objects.filter(
+            user=user,
+            status="APPROVED",
+            processed=True,
+        ).aaggregate(total=models.Sum("amount"))
+
+        total_charge_sales = charge_sales["total"] or 0
+
+        # Validate that spent credits match charge sales
+        is_consistent = abs(total_spent_credits - total_charge_sales) == 0 # this could be compared with a threshold
+
+        details = (
+            "All transactions are consistent"
+            if is_consistent
+            else f"Mismatch: User spent {total_spent_credits} but charge sales total is {total_charge_sales}"
+        )
+
+        return {
+            "total_approved_credits": total_approved_credits,
+            "current_user_credits": user.credit,
+            "total_spent_credits": total_spent_credits,
+            "total_charge_sales": total_charge_sales,
+            "is_consistent": is_consistent,
+            "details": details,
+        }
+
+    except User.DoesNotExist:
+        logger.error(f"User {user_id} not found")
+        return 404, {"detail": "User not found"}
+    except Exception:
+        logger.exception(f"Error validating user transactions for user ID {user_id}")
         raise
