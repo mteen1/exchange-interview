@@ -9,6 +9,7 @@ from ninja import Router
 from ninja import Schema
 from ninja.security import HttpBearer
 from pydantic import Field
+from rest_framework.authtoken.models import Token
 
 from tbdl.charge.models import ChargeSale
 from tbdl.charge.models import CreditRequest
@@ -24,8 +25,6 @@ class Error(Schema):
 
 class AuthBearer(HttpBearer):
     async def authenticate(self, request, token):
-        from rest_framework.authtoken.models import Token
-
         try:
             token_obj = await Token.objects.aget(key=token)
             user = await User.objects.aget(id=token_obj.user_id)
@@ -133,7 +132,7 @@ def approve_transaction(request, request_id: int):
         with transaction.atomic():
             # Lock the credit request row
             credit_request = CreditRequest.objects.select_for_update().get(
-                id=request_id
+                id=request_id,
             )
 
             if credit_request.processed:
@@ -151,7 +150,7 @@ def approve_transaction(request, request_id: int):
             )
 
             logger.info(
-                f"Successfully approved credit request {request_id} for user {request.auth.id}"
+                f"Successfully approved credit request {request_id} for user {request.auth.id}",
             )
 
             # Refresh from db to get updated state
@@ -255,7 +254,9 @@ async def validate_transactions(request):
         total_charge_sales = charge_sales["total"] or 0
 
         # Validate that spent credits match charge sales
-        is_consistent = abs(total_spent_credits - total_charge_sales) == 0 # this could be compared with a threshold
+        is_consistent = (
+            abs(total_spent_credits - total_charge_sales) == 0
+        )  # this could be compared with a threshold
 
         details = (
             "All transactions are consistent"
@@ -278,7 +279,8 @@ async def validate_transactions(request):
 
 
 @router.get(
-    "/users/{user_id}/validate", response={200: UserValidationResultSchema, 404: Error}
+    "/users/{user_id}/validate",
+    response={200: UserValidationResultSchema, 404: Error},
 )
 async def validate_user_transactions(request, user_id: int):
     try:
@@ -304,7 +306,9 @@ async def validate_user_transactions(request, user_id: int):
         total_charge_sales = charge_sales["total"] or 0
 
         # Validate that spent credits match charge sales
-        is_consistent = abs(total_spent_credits - total_charge_sales) == 0 # this could be compared with a threshold
+        is_consistent = (
+            abs(total_spent_credits - total_charge_sales) == 0
+        )  # this could be compared with a threshold
 
         details = (
             "All transactions are consistent"

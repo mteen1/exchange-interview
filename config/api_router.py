@@ -9,13 +9,15 @@ from tbdl.users.api.views import UserViewSet
 
 router = DefaultRouter() if settings.DEBUG else SimpleRouter()
 
-router.register("users", UserViewSet)
+router.register("users", UserViewSet, basename="users")
+router.register("phone", PhoneNumberViewSet, basename="phone-numbers")
+router.register("credit", CreditRequestViewSet, basename="credit-requests")
+router.register("charge", ChargeSaleViewSet, basename="charge-sales")
 
-# # Charge routes
-# router.register("phone-numbers", PhoneNumberViewSet, basename="phone-numbers")
-# router.register("credit-requests", CreditRequestViewSet, basename="credit-requests")
-# router.register("charge-sales", ChargeSaleViewSet, basename="charge-sales")
-
+# Add tags for API grouping
+PhoneNumberViewSet.__doc__ = "Phone number management"
+CreditRequestViewSet.__doc__ = "Credit request management"
+ChargeSaleViewSet.__doc__ = "Charge sale management"
 
 app_name = "api"
 urlpatterns = router.urls
