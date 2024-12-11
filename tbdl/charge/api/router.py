@@ -1,4 +1,5 @@
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from asgiref.sync import sync_to_async
@@ -222,6 +223,56 @@ def create_charge(request, data):
 @router.post("/charge-sales", response=ChargeSaleSchema)
 async def create_charge_sale(request, data: ChargeSaleCreateSchema):
     return await sync_to_async(create_charge)(request, data)
+
+
+def create_charge_threaded(request, data):
+    logger.info(
+        f"[Threaded] Creating charge sale for user {request.auth.id}, amount: {data.amount}, phone: {data.phone_number_id}",
+    )
+
+    try:
+        with transaction.atomic():
+            # First get and lock the user row
+            user = User.objects.select_for_update().get(id=request.auth.id)
+
+            if user.credit < data.amount:
+                logger.warning(
+                    f"[Threaded] Insufficient credit for user {user.id}. Required: {data.amount}, Available: {user.credit}",
+                )
+                return {"detail": "Insufficient credit"}
+
+            User.objects.filter(id=user.id).update(
+                credit=F("credit") - data.amount,
+            )
+
+            PhoneNumber.objects.filter(
+                id=data.phone_number_id,
+            ).select_for_update().update(
+                current_charge=F("current_charge") + data.amount,
+            )
+
+            charge_sale = ChargeSale.objects.create(
+                user=user,
+                phone_number_id=data.phone_number_id,
+                amount=data.amount,
+                processed=True,
+                status="APPROVED",
+            )
+            logger.info(
+                f"[Threaded] Successfully created charge sale for user {user.id}"
+            )
+            return charge_sale
+
+    except Exception as e:
+        logger.exception(f"[Threaded] Error creating charge sale: {e}")
+        raise
+
+
+@router.post("/charge-sales/threaded", response=ChargeSaleSchema)
+def create_charge_sale_threaded(request, data: ChargeSaleCreateSchema):
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        future = executor.submit(create_charge_threaded, request, data)
+        return future.result()
 
 
 @router.get("/validate", response=ValidationResultSchema)
